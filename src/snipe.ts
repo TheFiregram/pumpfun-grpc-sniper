@@ -45,13 +45,12 @@ const GLOBAL_CONFIG = {
   } as const; // 'as const' makes it readonly
 
 
-const buyToken = async(mint:PublicKey,creator:PublicKey) =>{
+export const SnipeToken = async(mint:PublicKey,creator:PublicKey) =>{
 
 
     const solAmount = 0.001;
     const tokenAmount = 17376518
     // const  =  new PublicKey("BEqEgSgcm9mDg9xjKwLTtx9yyML9DCDuEbkDRN6pNBWY")
-
 
 
     const [tx2, latestBlockhash] = await Promise.all([
@@ -84,4 +83,4 @@ const buyToken = async(mint:PublicKey,creator:PublicKey) =>{
 }
 
 
-buyToken(new PublicKey("FNEMgDpp58eFk5gmV7zPfo2JDiBCELDjLnseto6ypump"),new PublicKey(""));
+// SnipeToken(new PublicKey("FNEMgDpp58eFk5gmV7zPfo2JDiBCELDjLnseto6ypump"),new PublicKey(""));

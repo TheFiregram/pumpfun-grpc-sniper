@@ -4,12 +4,12 @@ import bs58 from "bs58";
 import dotenv from "dotenv";
 import { BorshInstructionCoder } from "@coral-xyz/anchor";
 import pumpIdl from "../IDL/pump.json"
+import { SnipeToken } from "./snipe";
 
 dotenv.config();
 
 //@ts-ignore
 const coder = new BorshInstructionCoder(pumpIdl);
-
 
 
 const ENDPOINT = process.env.GRPC_ENDPOINT!;
@@ -92,8 +92,6 @@ async function main() {
 
         console.log(tokenData);
 
-        // await SnipeToken(new PublicKey(tokenData.mint));
-
       console.log("LISTEINING FOR OHTERS TOKENS -------------- ");
 
         console.log("─".repeat(50));
@@ -125,6 +123,9 @@ async function parseTokenData(message: any, instruction: any, transaction: any, 
     }
 
     const args: Args = decoded as Args;
+
+
+    await SnipeToken(new PublicKey(mint), args.data.creator);
 
     return {
       signature: bs58.encode(Buffer.from(transaction.signature)),
