@@ -112,7 +112,6 @@ async function parseTokenData(message: any, instruction: any, transaction: any, 
     const accountKeys = message.accountKeys;
     const accounts = instruction.accounts;
     
-    // Extract account addresses
     const mint = new PublicKey(accountKeys[accounts[0]]).toBase58();
     const bonding_curve = new PublicKey(accountKeys[accounts[2]]).toBase58();
     const associated_bonding_curve = new PublicKey(accountKeys[accounts[3]]).toBase58();
