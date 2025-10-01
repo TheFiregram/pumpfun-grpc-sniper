@@ -74,14 +74,16 @@ export const SnipeToken = async(mint:PublicKey,creator:PublicKey) =>{
     const transection = new Transaction().add(...tx2.data);
     transection.recentBlockhash = latestBlockhash.blockhash;
     transection.feePayer = signer.publicKey;
+
   
     const simualtion = await connection.simulateTransaction(transection);
-
     console.log("here is simulation---", simualtion);
 
+    transection.sign(signer);
+    const sign = await connection.sendRawTransaction(transection.serialize());
+    console.log("here is sign---", `https://solscan.io/tx/${sign}`);
     }
 
 }
 
 
-// SnipeToken(new PublicKey("FNEMgDpp58eFk5gmV7zPfo2JDiBCELDjLnseto6ypump"),new PublicKey(""));
