@@ -61,7 +61,7 @@ export type PumpFunResult<T> =
       error: PumpFunError;
     };
 
-export class PumpFunSDK {
+export class PumpHelper {
   private program: anchor.Program<Pump>;
 
   constructor(connection: Connection) {

@@ -1,18 +1,19 @@
 import {
+  clusterApiUrl,
     Connection,
     Keypair,
     LAMPORTS_PER_SOL,
     PublicKey,
     Transaction,
   } from "@solana/web3.js";
-  import { PumpFunSDK } from "./pumpHelper/helper";
+  import { PumpHelper } from "./pumpHelper/helper";
   import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
   import { BN } from "bn.js";
 import dotenv from "dotenv";
 
 dotenv.config();
-const connection = new Connection("https://mainnet.helius-rpc.com/?api-key=8b6b98fb-7c47-481b-a7dc-4c760ce43572", "confirmed");
-const sdk = new PumpFunSDK(connection);
+const connection = new Connection(clusterApiUrl("mainnet-beta"), "confirmed");
+const sdk = new PumpHelper(connection);
 
 const signer = Keypair.fromSecretKey(
   bs58.decode(process.env.PRIVATE_KEY!)
