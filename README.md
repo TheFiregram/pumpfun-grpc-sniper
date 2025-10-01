@@ -1,4 +1,4 @@
-## Pumpfun Sniper Bot (Solana)
+## Pumpfun Grpc Sniper and Bundler Bot (Solana)
 
 High-performance listener and sniping toolkit for Pump.fun tokens on Solana. It subscribes to Yellowstone gRPC for near real-time detection of new Pump.fun token creations and prepares buy transactions using a lightweight SDK wrapper. Concurrency is bounded via an internal queue with TTL deduplication and per-task timeouts for stability under heavy throughput.
 
