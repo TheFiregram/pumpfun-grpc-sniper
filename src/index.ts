@@ -151,6 +151,15 @@ async function main() {
   console.log(`  limits   ${config.maxSolPerDay} SOL/day (spent ${solFromLamports(spentToday())}), ${config.maxOpenPositions} open max, ${positions().length} open now`);
   console.log(`  exits    TP +${config.takeProfitPct}%, SL -${config.stopLossPct}%, max hold ${config.maxHoldSeconds}s`);
 
+  const tipShare = (config.buyTipSol / config.buySol) * 100;
+  if (tipShare > 5) {
+    console.warn(
+      `⚠️  The ${config.buyTipSol} SOL tip is ${tipShare.toFixed(0)}% of each ${config.buySol} SOL buy. With fees, every ` +
+        `position starts about ${(tipShare + 2.5).toFixed(0)}% down, close to your ${config.stopLossPct}% stop-loss. ` +
+        `Consider a bigger BUY_SOL or a smaller BUY_TIP_SOL.`,
+    );
+  }
+
   await loadFees();
   await startBlockhashCache(config.blockhashRefreshMs);
   if (!config.dryRun) startBalanceCache(config.balanceRefreshMs);

@@ -118,26 +118,37 @@ export async function sendBundleViaSender(txs: VersionedTransaction[]): Promise<
 }
 
 /**
- * Wait for a signature to land, using the SAME blockhash the transaction was signed with,
- * so expiry is judged correctly. Re-sends every 2s while waiting (Sender does not retry for you).
+ * Wait for a signature to land, using the SAME blockhash the transaction was signed with.
+ * Keeps waiting until that blockhash has expired, because only then is it certain the transaction
+ * can no longer land (a fixed timeout could give up on a buy that then lands). Re-sends every 2s,
+ * since Sender does not retry for you. The block height is checked less often to save RPC credits.
  */
-export async function confirm(built: BuiltTx, resend = true, timeoutMs = 45_000): Promise<{ ok: boolean; err?: unknown }> {
+export async function confirm(built: BuiltTx, resend = true, hardTimeoutMs = 150_000): Promise<{ ok: boolean; err?: unknown }> {
   const start = Date.now();
   let lastResend = start;
-  while (Date.now() - start < timeoutMs) {
+  let lastHeightCheck = 0;
+  while (Date.now() - start < hardTimeoutMs) {
     const { value } = await connection.getSignatureStatuses([built.signature]);
     const st = value[0];
     if (st?.err) return { ok: false, err: st.err };
     if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) return { ok: true };
 
-    const height = await connection.getBlockHeight("confirmed");
-    if (height > built.blockhash.lastValidBlockHeight) return { ok: false, err: "blockhash expired" };
+    if (Date.now() - lastHeightCheck > 3_000) {
+      lastHeightCheck = Date.now();
+      const height = await connection.getBlockHeight("confirmed");
+      if (height > built.blockhash.lastValidBlockHeight) {
+        // One last look: it may have landed in the final blocks.
+        const last = (await connection.getSignatureStatuses([built.signature], { searchTransactionHistory: true })).value[0];
+        if (last && !last.err) return { ok: true };
+        return { ok: false, err: last?.err ?? "blockhash expired" };
+      }
+    }
 
     if (resend && Date.now() - lastResend > 2_000) {
       lastResend = Date.now();
       sendViaSender(built.tx).catch(() => undefined);
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 1_000));
   }
   return { ok: false, err: "confirmation timeout" };
 }
