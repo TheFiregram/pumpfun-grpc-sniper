@@ -1,125 +1,74 @@
-## Pumpfun Grpc Sniper and Bundler Bot (Solana)
+## Pump.fun gRPC Sniper (Solana, Helius)
 
-High-performance listener and sniping toolkit for Pump.fun tokens on Solana. It subscribes to Yellowstone gRPC for near real-time detection of new Pump.fun token creations and prepares buy transactions using a lightweight SDK wrapper. Concurrency is bounded via an internal queue with TTL deduplication and per-task timeouts for stability under heavy throughput.
+Listens to Helius (WebSocket on any plan, or LaserStream gRPC on Business/Professional) for new Pump.fun coins, filters them, buys through
+Helius Sender, and sells on take-profit, stop-loss or a time limit. **Starts in dry-run mode**: it
+simulates every buy and sends nothing until you set `DRY_RUN=false`.
 
-### Features
-- **Low-latency stream**: Yellowstone gRPC `processed` commitment for fast detection.
-- **Instruction decoding**: Detects Pump.fun `create` discriminator and extracts mint, creator, metadata.
-- **Sniping pipeline**: Generates buy instructions via `PumpHelper`, simulates, then signs and sends.
-- **Parallel processing**: Concurrency-limited queue with per-task timeout and mint deduplication.
-- **Helpers**: PDA helpers, bonding curve math utilities, legacy/Jito executors, bundle buy scaffold, IDL types.
+> Sniping new tokens is very high risk. Most new coins go to zero, and you pay a tip, a priority fee
+> and token-account rent on every trade. Use a separate wallet with only what you can afford to lose.
 
-### Repository structure
-- `src/index.ts`: gRPC subscriber, decoding, concurrency queue, dedupe + timeout, enqueues `SnipeToken`.
-- `src/snipe.ts`: Sniping flow using `PumpHelper` to construct, simulate, sign, and send a buy tx.
-- `src/pumpHelper/*`:
-  - `helper.ts`: Anchor-based helper to build buy/sell/extend instructions, fetch PDAs and accounts.
-  - `pda.ts`: PDA derivations for global, bonding curve, creator vault.
-  - `calc.ts`: Bonding curve math utilities and pricing helpers.
-  - `types.ts`: Program state interfaces (`Global`, `BondingCurve`).
-- `src/executor/*`:
-  - `legacy.ts`: Raw send/confirm helpers for `VersionedTransaction`.
-  - `jito.ts`: Jito bundle sender to multiple block engines.
-- `src/bundleBuy.ts`: Example to aggregate multiple wallet buys (bundle) and simulate.
-- `src/buyersKeys.ts`: Placeholder array for wallet keypairs used in bundled buy.
-- `src/config/index.ts`: RPC endpoints list and a shared `connection` helper.
-- `IDL/pump.json` and `IDL/pumptypes.ts`: Program IDL and TS types for Pump.fun.
+### What it does
+- **Detects both launch types**: legacy `create` (SPL Token) and `create_v2` (Token-2022), including
+  launches made through other programs (inner instructions) and transactions that use lookup tables.
+- **Reads launch data from Pump.fun's own events** (mint, creator, token program, mayhem/cashback flags,
+  curve reserves after the creator's buy), so quotes are based on the real price, not a guess.
+- **Trades with `buy_exact_quote_in_v3` / `sell_v3`**, the current 17-account instructions. Fee rates and
+  buyback fee recipients are read from the on-chain Global account at startup, not hard-coded.
+- **Sends through Helius Sender** with a tip and priority fee, re-sends while waiting, and confirms
+  against the same blockhash the transaction was signed with.
+- **Two launch feeds.** `FEED=websocket` (default) works on every Helius plan, including Free: it
+  subscribes only to transactions that touch Pump.fun's mint-authority account, i.e. coin creations,
+  and reads the launch events from the logs. `FEED=laserstream` uses gRPC (Business/Professional plans),
+  with pings, a watchdog and automatic reconnect.
+- **Credit-friendly defaults** for the Free plan (1M credits/month): slow background refreshes, at most
+  one dry-run simulation every 30s, and a cap on full-transaction fetches.
+- **Limits risk**: max SOL per trade and per day, max open positions, minimum wallet reserve, slippage
+  limits on every buy and sell, and a queue that drops stale launches instead of buying late.
+- **Exits**: polls open positions, sells on TP/SL/max hold, widens slippage after each failed sell, and
+  closes the token account afterwards to get its rent back. Positions are saved to `state/` and resume
+  after a restart.
+- **Graduated coins are sold automatically on PumpSwap.** When a coin completes its bonding curve the bot
+  waits for the PumpSwap pool to open, keeps tracking TP/SL/max hold on the pool price, and sells with
+  PumpSwap `sell_v2`. The SOL comes back as wrapped SOL and is unwrapped in the same transaction.
 
-### Requirements
-- Node.js 18+
-- Solana RPC access (Helius/Alchemy/etc.)
-- Yellowstone gRPC endpoint (e.g. Triton One)
+### Filters (no RPC calls, run before every buy)
+Skips coins that are not SOL-paired, cashback coins (v3 doesn't support them), mayhem coins
+(configurable), coins where the creator bought more than `MAX_DEV_BUY_PCT` of supply, blocked creators
+and blocklisted names. Pump.fun mints are controlled by the program, so classic mint/freeze-authority
+rug checks don't apply here; the creator's own bag is the main risk on launch.
 
-### Installation
+### Setup
 ```bash
-npm install
+npm install             # also refreshes package-lock.json for the new dev tools
+cp .env.example .env    # fill in HELIUS_API_KEY and PRIVATE_KEY
+npm run typecheck
+npm start               # dry run: watch the simulations first
 ```
+The default WebSocket feed works on the Helius Free plan. LaserStream (`FEED=laserstream`) is faster
+but needs a Business or Professional plan. Pick the Sender region closest to your computer in `.env`.
 
-Optionally install ts-node globally for local runs:
-```bash
-npm install -D ts-node typescript
-```
-
-### Environment variables
-Create a `.env` file in the project root.
-```bash
-# Yellowstone gRPC
-GRPC_ENDPOINT=your_yellowstone_grpc_endpoint
-
-# Trading keypair (base58 secret key)
-PRIVATE_KEY=base58_secret_key
-
-# Concurrency controls (optional)
-SNIPE_CONCURRENCY=4           # max parallel snipes
-SNIPE_TIMEOUT_MS=8000         # per-snipe timeout
-DEDUPE_TTL_MS=60000           # skip same mint within TTL
-```
-
-Notes:
-- `PRIVATE_KEY` is used by `src/snipe.ts` to sign and send transactions.
-- Some modules also use `src/config/index.ts`’s `connection`; update RPCs as needed.
-
-### Quick start: run the listener
-Use ts-node (or your preferred TS runner) to start the gRPC listener.
-```bash
-npx ts-node src/index.ts
-```
-
-You should see:
-- “Starting Pump.fun token listener…”
-- “Listening for new Pump.fun tokens…”
-- Logs for detected token creations and the parsed token metadata
-
-When a new token is detected, the bot enqueues a snipe task. Tasks are executed in parallel up to `SNIPE_CONCURRENCY`, each with a timeout `SNIPE_TIMEOUT_MS`, and duplicate mints are skipped within `DEDUPE_TTL_MS`.
-
-### Sniping flow overview
-1. `src/index.ts` subscribes to Yellowstone and filters transactions containing the Pump.fun `create` discriminator.
-2. It decodes args with `BorshInstructionCoder`, extracts `mint` and `creator`, then enqueues a call to `SnipeToken(mint, creator)`.
-3. `src/snipe.ts` uses `PumpHelper` to build buy instructions, simulates, then signs and sends the transaction.
-4. Alternatively, you can integrate `executor/legacy.ts` or `executor/jito.ts` if you prefer different execution flows/bundles.
-
-### Executing transactions (optional)
-- Legacy send helper:
-  - See `src/executor/legacy.ts` (`createAndSendV0Tx`, `execute`).
-- Jito bundles:
-  - See `src/executor/jito.ts` to send a bundle to multiple block engines and confirm.
-
-These are scaffolds; integrate them into the sniping step if you want to actually submit transactions instead of simulating.
+### Files
+- `src/feeds/websocket.ts`: WebSocket launch feed (any Helius plan)
+- `src/index.ts`: LaserStream gRPC listener, dedupe, bounded queue, startup
+- `src/snipe.ts`: quoting, buy transaction, dry-run simulation, spending checks
+- `src/positions.ts`: take-profit / stop-loss / max-hold selling
+- `src/filters.ts`: launch filters
+- `src/state.ts`: daily spend and open positions, saved atomically to `state/state.json`
+- `src/executor/sender.ts`: Helius Sender, tips, priority fees, blockhash cache, confirmation
+- `src/pump/amm.ts`: PumpSwap pool lookup, pricing and `sell_v2`
+- `src/pump/*`: Pump.fun constants, PDAs, event/account decoding, curve maths, instruction builders
+- `src/bundleBuy.ts`, `src/lookupTable/*`: multi-wallet buy with a lookup table (optional)
+- `IDL/`: the current official Pump.fun IDL (from pump-fun/pump-public-docs), for reference
 
 ### Bundled buys (optional)
-`src/bundleBuy.ts` demonstrates aggregating multiple wallets’ buy instructions into a single v0 transaction (potentially with an Address Lookup Table).
-- Populate `src/buyersKeys.ts` with `Keypair` instances to include.
-- Provide `lookup_address` (ALT) when using address lookup tables.
-- The file currently simulates; adapt to send on mainnet if desired.
+1. `distributeSol` creates and funds wallets. Their keys are saved to `keys/data.json` **before** any
+   SOL is sent, and the file is never overwritten. `keys/` is git-ignored; back it up somewhere safe.
+2. `createLUT` creates a lookup table; `lookupTxs` fills it with the accounts for one mint.
+3. `bundleBuyWithLookup` buys from all wallets in one transaction (respects `DRY_RUN` and spend limits).
 
-### Configuration and tuning
-- `SNIPE_CONCURRENCY`: Increase to process more snipes in parallel; reduce if you see resource contention.
-- `SNIPE_TIMEOUT_MS`: Keep small to avoid stuck tasks under network stalls.
-- `DEDUPE_TTL_MS`: Protects against reprocessing the same mint too frequently.
-- Commitment level is set to `processed` in `src/index.ts` for low latency.
-
-### Safety and production notes
-- Always simulate before sending; handle failures and slippage controls.
-- Secure your `.env` and never commit private keys.
-- Consider distinct senders for bundles and rate-limit RPC calls.
-- Monitor blockhash expiry and recompile/sign transactions close to send time.
-
-### Scripts (suggested)
-You may add these npm scripts for convenience:
-```json
-{
-  "scripts": {
-    "start": "ts-node src/index.ts"
-  }
-}
-```
-
-Then run:
-```bash
-npm run start
-```
+### Not covered
+- Raydium launches.
+- Coins paired with USDC or another pump coin are skipped.
 
 ### License
 MIT
-
-
