@@ -6,6 +6,7 @@ import { Launch } from "./pump/detect";
 import { buyExactSolInV3Ix, createUserAtaIx, TradeAccountsArgs } from "./pump/instructions";
 import { lamportsFromSol, solFromLamports, tokensOutForSolIn, withSlippageDown } from "./pump/math";
 import { ata } from "./pump/pda";
+import { tokenAccountAmount } from "./pump/amm";
 import { addPosition, commitSpend, release, tryReserve } from "./state";
 
 let fees: GlobalFees | null = null;
@@ -30,6 +31,35 @@ export function tradeAccounts(mint: PublicKey, baseTokenProgram: PublicKey, user
 }
 
 let inFlight = 0;
+
+// ---------- Wallet balance cache ----------
+let balanceCache: { lamports: bigint; at: number } | null = null;
+export function startBalanceCache(intervalMs = 3_000) {
+  const refresh = () =>
+    connection
+      .getBalance(getSigner().publicKey, "processed")
+      .then((l) => (balanceCache = { lamports: BigInt(l), at: Date.now() }))
+      .catch(() => undefined);
+  void refresh();
+  setInterval(refresh, intervalMs).unref();
+}
+/** Cached balance, or null if it is missing or older than 15s (then the check is skipped, not failed). */
+function walletLamports(): bigint | null {
+  return balanceCache && Date.now() - balanceCache.at < 15_000 ? balanceCache.lamports : null;
+}
+
+/** Raw token balance of an account: 0n if it doesn't exist, null if the RPC kept failing. */
+export async function readTokenBalance(account: PublicKey, tries = 4): Promise<bigint | null> {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const info = await connection.getAccountInfo(account, "confirmed");
+      return info ? tokenAccountAmount(info.data) : 0n;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    }
+  }
+  return null;
+}
 
 /**
  * Buy a freshly launched coin. Never throws: logs and returns.
@@ -80,36 +110,41 @@ export async function snipe(launch: Launch, deadline: number): Promise<void> {
       return;
     }
 
-    // Balance check: keep enough SOL for sell fees and tips.
-    const balance = BigInt(await connection.getBalance(signer.publicKey, "processed"));
+    // Balance check from a cached value (refreshed in the background) so it adds no latency.
+    const balance = walletLamports();
     const needed = cost + lamportsFromSol(config.minWalletReserveSol) + 3_000_000n; // + ATA and volume-account rent
-    if (balance < needed) {
-      console.log(`⏭️  ${tag}: wallet has ${solFromLamports(balance)} SOL, needs ${solFromLamports(needed)}`);
+    if (balance !== null && balance < needed) {
+      console.log(`⏭️  ${tag}: wallet has ${solFromLamports(balance!)} SOL, needs ${solFromLamports(needed)}`);
       return;
     }
 
     await sendViaSender(built.tx);
     console.log(`📤 ${tag}: buy sent https://solscan.io/tx/${built.signature}`);
     const res = await confirm(built);
-    // A landed-but-failed tx only costs the network fee; the tip transfer is rolled back with it.
-    if (!res.ok) {
+
+    // Decide by what the wallet holds, not only by the confirmation result: a buy can land
+    // after confirm() gives up, and those tokens must still be tracked and sold.
+    const held = await readTokenBalance(ata(c.mint, signer.publicKey, c.tokenProgram));
+    if (held === 0n || (held === null && !res.ok)) {
+      // A failed tx only costs the network fee; the tip transfer is rolled back with it.
       console.log(`❌ ${tag}: buy did not land (${JSON.stringify(res.err)})`);
       return;
     }
 
     commitSpend(cost);
     committed = true;
-    const bal = await connection.getTokenAccountBalance(ata(c.mint, signer.publicKey, c.tokenProgram), "confirmed");
+    // If the balance couldn't be read, record the minimum we were guaranteed; sells re-read the real balance.
+    const tokens = held ?? minTokensOut;
     addPosition({
       mint: c.mint.toBase58(),
       symbol: c.symbol,
       baseTokenProgram: c.tokenProgram.toBase58(),
-      tokens: bal.value.amount,
-      costLamports: spend.toString(),
+      tokens: tokens.toString(),
+      costLamports: cost.toString(), // buy + tip, so P&L is honest
       openedAt: Date.now(),
       buySignature: built.signature,
     });
-    console.log(`✅ ${tag}: bought ${bal.value.uiAmountString} tokens for ${config.buySol} SOL`);
+    console.log(`✅ ${tag}: bought ${Number(tokens) / 1e6} tokens for ${config.buySol} SOL`);
   } catch (e) {
     console.error(`❌ ${tag}: snipe error:`, (e as Error).message);
   } finally {

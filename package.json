@@ -1,7 +1,7 @@
 {
   "scripts": {
-    "start": "npx ts-node src/index.ts",
-    "typecheck": "npx tsc --noEmit"
+    "start": "ts-node src/index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=18"
@@ -17,6 +17,9 @@
     "dotenv": "^17.2.3"
   },
   "devDependencies": {
-    "@types/bn.js": "^5.2.0"
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^22.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   }
 }

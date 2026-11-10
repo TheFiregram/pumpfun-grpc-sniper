@@ -10,6 +10,8 @@ export interface Position {
   costLamports: string;
   openedAt: number;
   buySignature: string;
+  /** Set after repeated failed sells: the bot stops trying and asks you to sell manually. */
+  stuck?: boolean;
 }
 
 interface StateFile {

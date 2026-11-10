@@ -6,7 +6,7 @@ import { PUMP_PROGRAM_ID } from "./pump/constants";
 import { Launch, parseLaunches } from "./pump/detect";
 import { solFromLamports } from "./pump/math";
 import { startPositionManager } from "./positions";
-import { loadFees, snipe } from "./snipe";
+import { loadFees, snipe, startBalanceCache } from "./snipe";
 import { positions, spentToday } from "./state";
 
 // ---------- Bounded work queue: drops old signals instead of buying minutes late ----------
@@ -151,6 +151,7 @@ async function main() {
 
   await loadFees();
   await startBlockhashCache();
+  if (!config.dryRun) startBalanceCache();
   startSenderKeepAlive();
   await startPositionManager();
 
@@ -167,6 +168,15 @@ async function main() {
     await new Promise((r) => setTimeout(r, backoff));
     backoff = Math.min(backoff * 2, 30_000);
   }
+}
+
+// A stray rejected promise must not kill the bot while it holds positions.
+process.on("unhandledRejection", (e) => console.error("Unhandled error (bot keeps running):", (e as Error)?.message ?? e));
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    console.log(`\n${sig} received, stopping. Open positions are saved in ${config.stateFile} and resume on next start.`);
+    process.exit(0);
+  });
 }
 
 main().catch((e) => {

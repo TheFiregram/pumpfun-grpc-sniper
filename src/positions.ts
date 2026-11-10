@@ -16,6 +16,7 @@ type Venue =
   | { kind: "amm"; pool: PublicKey; state: PoolState }
   | { kind: "migrating" }; // curve complete, pool not created yet: nothing can trade
 
+const MAX_SELL_ATTEMPTS = 8;
 const selling = new Set<string>();
 const sellFailures = new Map<string, number>();
 const migratingSince = new Map<string, number>();
@@ -43,28 +44,43 @@ export async function startPositionManager() {
 }
 
 async function checkAll() {
-  const open = positions().filter((p) => !selling.has(p.mint));
+  const open = positions().filter((p) => !selling.has(p.mint) && !p.stuck);
   if (open.length === 0) return;
   const mints = open.map((p) => new PublicKey(p.mint));
-  const curves = await connection.getMultipleAccountsInfo(mints.map(bondingCurvePda), "processed");
-
-  // Graduated coins: look up their PumpSwap pools in one batch.
-  const gradIdx = open.map((_, i) => i).filter((i) => {
-    const info = curves[i];
-    return !info || decodeBondingCurve(info.data).complete;
+  const curveInfos = await connection.getMultipleAccountsInfo(mints.map(bondingCurvePda), "processed");
+  // Decode each curve on its own so one bad account can't block the other positions.
+  const curves = curveInfos.map((info, i) => {
+    if (!info) return null;
+    try {
+      return decodeBondingCurve(info.data);
+    } catch (e) {
+      console.warn(`${open[i].symbol}: could not read bonding curve:`, (e as Error).message);
+      return undefined; // skip this position this tick
+    }
   });
+
+  // Graduated coins (curve complete or closed): look up their PumpSwap pools in one batch.
+  const gradIdx = open.map((_, i) => i).filter((i) => curves[i] === null || curves[i]?.complete === true);
   const poolKeys = gradIdx.map((i) => canonicalPoolPda(mints[i]));
   const poolInfos = poolKeys.length ? await connection.getMultipleAccountsInfo(poolKeys, "processed") : [];
   const pools = new Map<number, { pool: PublicKey; state: PoolState }>();
   gradIdx.forEach((i, j) => {
     const info = poolInfos[j];
-    if (info) pools.set(i, { pool: poolKeys[j], state: decodePool(info.data) });
+    if (!info) return;
+    try {
+      pools.set(i, { pool: poolKeys[j], state: decodePool(info.data) });
+    } catch (e) {
+      console.warn(`${open[i].symbol}: could not read PumpSwap pool:`, (e as Error).message);
+    }
   });
   // Pool vault balances, for pricing.
   const vaultKeys = [...pools.values()].flatMap((p) => [p.state.poolBaseTokenAccount, p.state.poolQuoteTokenAccount]);
   const vaultInfos = vaultKeys.length ? await connection.getMultipleAccountsInfo(vaultKeys, "processed") : [];
   const vaults = new Map<string, bigint>();
-  vaultKeys.forEach((k, j) => vaultInfos[j] && vaults.set(k.toBase58(), tokenAccountAmount(vaultInfos[j]!.data)));
+  vaultKeys.forEach((k, j) => {
+    const info = vaultInfos[j];
+    if (info && info.data.length >= 72) vaults.set(k.toBase58(), tokenAccountAmount(info.data));
+  });
 
   for (let i = 0; i < open.length; i++) {
     const p = open[i];
@@ -72,9 +88,11 @@ async function checkAll() {
     let venue: Venue;
     let value: bigint;
 
+    const curve = curves[i];
+    if (curve === undefined) continue;
     if (!gradIdx.includes(i)) {
       venue = { kind: "curve" };
-      value = solOutForTokensIn(decodeBondingCurve(curves[i]!.data), tokens, totalFeeBps());
+      value = solOutForTokensIn(curve!, tokens, totalFeeBps());
       migratingSince.delete(p.mint);
     } else if (pools.has(i)) {
       const { pool, state } = pools.get(i)!;
@@ -151,13 +169,23 @@ async function sell(p: Position, venue: Venue, expectedLamports: bigint, reason:
       removePosition(p.mint);
       sellFailures.delete(p.mint);
     } else {
-      sellFailures.set(p.mint, tries + 1);
-      console.log(`❌ ${p.symbol}: sell failed (${JSON.stringify(res.err)}), attempt ${tries + 1}. Will retry.`);
-      updatePosition(p.mint, { tokens: amount.toString() });
+      failed(p, tries + 1, JSON.stringify(res.err), amount);
     }
   } catch (e) {
-    console.error(`❌ ${p.symbol}: sell error:`, (e as Error).message);
+    failed(p, (sellFailures.get(p.mint) ?? 0) + 1, (e as Error).message);
   } finally {
     selling.delete(p.mint);
+  }
+}
+
+/** Count a failed sell. After MAX_SELL_ATTEMPTS, stop retrying (each try costs a fee) and flag it. */
+function failed(p: Position, attempt: number, why: string, amount?: bigint) {
+  sellFailures.set(p.mint, attempt);
+  if (attempt >= MAX_SELL_ATTEMPTS) {
+    console.error(`🛑 ${p.symbol}: ${attempt} sells failed (${why}). Stopped retrying; sell ${p.mint} manually, then remove it from ${config.stateFile}.`);
+    updatePosition(p.mint, { stuck: true, ...(amount !== undefined ? { tokens: amount.toString() } : {}) });
+  } else {
+    console.log(`❌ ${p.symbol}: sell failed (${why}), attempt ${attempt}/${MAX_SELL_ATTEMPTS}. Will retry.`);
+    if (amount !== undefined) updatePosition(p.mint, { tokens: amount.toString() });
   }
 }

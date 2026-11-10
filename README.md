@@ -34,7 +34,7 @@ rug checks don't apply here; the creator's own bag is the main risk on launch.
 
 ### Setup
 ```bash
-npm install
+npm install             # also refreshes package-lock.json for the new dev tools
 cp .env.example .env    # fill in HELIUS_API_KEY and PRIVATE_KEY
 npm run typecheck
 npm start               # dry run: watch the simulations first
