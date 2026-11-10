@@ -62,7 +62,7 @@ export const createAndSendV0Tx = async (txInstructions: TransactionInstruction[]
     return confirmation.err == null
 
   } catch (error) {
-    console.log(".....")
+    console.log("Transaction failed:", (error as Error).message)
     return false
   }
 }

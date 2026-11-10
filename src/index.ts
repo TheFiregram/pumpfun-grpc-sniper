@@ -1,228 +1,175 @@
-import Client, { CommitmentLevel, SubscribeRequest, SubscribeUpdate } from "@triton-one/yellowstone-grpc";
-import { PublicKey } from "@solana/web3.js";
-import bs58 from "bs58";
-import dotenv from "dotenv";
-import { BorshInstructionCoder } from "@coral-xyz/anchor";
-import pumpIdl from "../IDL/pump.json"
-import { SnipeToken } from "./snipe";
+import Client, { CommitmentLevel, SubscribeRequest } from "@triton-one/yellowstone-grpc";
+import { config, getSigner, redact } from "./config";
+import { startBlockhashCache, startSenderKeepAlive } from "./executor/sender";
+import { skipReason } from "./filters";
+import { PUMP_PROGRAM_ID } from "./pump/constants";
+import { Launch, parseLaunches } from "./pump/detect";
+import { solFromLamports } from "./pump/math";
+import { startPositionManager } from "./positions";
+import { loadFees, snipe } from "./snipe";
+import { positions, spentToday } from "./state";
 
-dotenv.config();
+// ---------- Bounded work queue: drops old signals instead of buying minutes late ----------
+const queue: Launch[] = [];
+let active = 0;
 
-//@ts-ignore
-const coder = new BorshInstructionCoder(pumpIdl);
+function enqueue(l: Launch) {
+  if (queue.length >= config.maxQueue) {
+    const dropped = queue.shift()!;
+    console.log(`⏭️  ${dropped.create.symbol}: dropped, queue full`);
+  }
+  queue.push(l);
+  pump();
+}
 
-
-const ENDPOINT = process.env.GRPC_ENDPOINT!;
-const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-
-
-const CREATE_DISCRIMINATOR = Buffer.from([24, 30, 200, 40, 5, 28, 7, 119]);
-
-
-// Concurrency, timeout, and dedupe configuration
-const MAX_CONCURRENCY = Number(process.env.SNIPE_CONCURRENCY || 4);
-const SNIPE_TIMEOUT_MS = Number(process.env.SNIPE_TIMEOUT_MS || 8000);
-const DEDUPE_TTL_MS = Number(process.env.DEDUPE_TTL_MS || 60000);
-
-class ConcurrencyQueue {
-  private active = 0;
-  private queue: Array<() => Promise<void>> = [];
-  constructor(private concurrency: number) {}
-
-  add(task: () => Promise<void>): Promise<void> {
-    return new Promise((resolve) => {
-      const run = async () => {
-        this.active++;
-        try {
-          await task();
-        } finally {
-          this.active--;
-          this.next();
-          resolve();
-        }
-      };
-      this.queue.push(run);
-      this.next();
+function pump() {
+  while (active < config.snipeConcurrency && queue.length) {
+    const l = queue.shift()!;
+    const deadline = l.receivedAt + config.maxSignalAgeMs;
+    if (Date.now() > deadline) {
+      console.log(`⏭️  ${l.create.symbol}: dropped, signal older than ${config.maxSignalAgeMs}ms`);
+      continue;
+    }
+    active++;
+    snipe(l, deadline).finally(() => {
+      active--;
+      pump();
     });
   }
-
-  private next() {
-    while (this.active < this.concurrency && this.queue.length) {
-      const fn = this.queue.shift()!;
-      fn();
-    }
-  }
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const id = setTimeout(() => reject(new Error("snipe timeout")), ms);
-    promise.then(
-      (v) => {
-        clearTimeout(id);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(id);
-        reject(e);
-      }
-    );
-  });
-}
-
-const snipeQueue = new ConcurrencyQueue(MAX_CONCURRENCY);
-const seenMints = new Map<string, number>();
-
-function shouldProcessMint(mint: string): boolean {
+// ---------- Dedupe ----------
+const seen = new Map<string, number>();
+function firstTime(mint: string): boolean {
   const now = Date.now();
-  const last = seenMints.get(mint) || 0;
-  if (now - last < DEDUPE_TTL_MS) return false;
-  seenMints.set(mint, now);
+  if (now - (seen.get(mint) ?? 0) < config.dedupeTtlMs) return false;
+  seen.set(mint, now);
   return true;
 }
-
-// Periodic cleanup of dedupe map
 setInterval(() => {
   const now = Date.now();
-  for (const [mint, ts] of seenMints) {
-    if (now - ts > DEDUPE_TTL_MS) seenMints.delete(mint);
-  }
-  // @ts-ignore - unref might not exist in browser-like envs
-}, DEDUPE_TTL_MS).unref?.();
+  for (const [m, t] of seen) if (now - t > config.dedupeTtlMs) seen.delete(m);
+}, 60_000).unref();
 
-interface Args {
-   name: string
-   data: {
-    name: string
-    symbol: string
-    uri: string
-    creator: PublicKey
-   }
+function onLaunch(l: Launch) {
+  const c = l.create;
+  if (!firstTime(c.mint.toBase58())) return;
+  const reason = skipReason(l);
+  console.log(
+    `🚀 ${l.instruction} ${c.name} (${c.symbol}) ${c.mint.toBase58()} creator ${c.creator.toBase58()} slot ${l.slot}` +
+      (reason ? `  → skip: ${reason}` : "  → queued"),
+  );
+  if (!reason) enqueue(l);
+}
+
+// ---------- gRPC stream with keep-alive pings and automatic reconnect ----------
+const request: SubscribeRequest = {
+  accounts: {},
+  slots: {},
+  transactions: {
+    pump: {
+      vote: false,
+      failed: false,
+      accountInclude: [PUMP_PROGRAM_ID.toBase58()],
+      accountExclude: [],
+      accountRequired: [],
+    },
+  },
+  transactionsStatus: {},
+  entry: {},
+  blocks: {},
+  blocksMeta: {},
+  commitment: CommitmentLevel.PROCESSED,
+  accountsDataSlice: [],
+  ping: undefined,
+};
+
+const pingRequest = (id: number): SubscribeRequest => ({
+  accounts: {}, slots: {}, transactions: {}, transactionsStatus: {}, entry: {}, blocks: {}, blocksMeta: {},
+  accountsDataSlice: [], ping: { id },
+});
+
+async function streamOnce(): Promise<void> {
+  const client: any = new Client(config.grpcEndpoint, config.grpcToken, { "grpc.max_receive_message_length": 64 * 1024 * 1024 });
+  if (typeof client.connect === "function") await client.connect(); // newer client versions need this
+  const stream = await client.subscribe();
+
+  await new Promise<void>((resolve, reject) => {
+    stream.write(request, (err: unknown) => (err ? reject(err) : resolve()));
+  });
+  console.log(`✓ Listening for Pump.fun launches on ${config.grpcEndpoint}`);
+
+  let pingId = 0;
+  const pinger = setInterval(() => stream.write(pingRequest(++pingId), () => undefined), 10_000);
+  let lastData = Date.now();
+
+  await new Promise<void>((resolve) => {
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastData > 30_000) {
+        console.warn("No data for 30s, reconnecting...");
+        stream.cancel?.();
+        stream.destroy?.();
+        done();
+      }
+    }, 5_000);
+    let finished = false;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      clearInterval(pinger);
+      clearInterval(watchdog);
+      resolve();
+    };
+    stream.on("data", (data: any) => {
+      lastData = Date.now();
+      if (!data?.transaction) return;
+      try {
+        for (const l of parseLaunches(data, lastData)) onLaunch(l);
+      } catch (e) {
+        console.error("Error parsing transaction:", (e as Error).message);
+      }
+    });
+    stream.on("error", (e: Error) => {
+      console.error("Stream error:", e.message);
+      done();
+    });
+    stream.on("end", done);
+    stream.on("close", done);
+  });
 }
 
 async function main() {
-  console.log("Starting Pump.fun token listener...");
-  
-  const client = new Client(ENDPOINT,undefined,undefined);
-  const stream = await client.subscribe();
+  const signer = getSigner();
+  console.log("Pump.fun sniper starting");
+  console.log(`  wallet   ${signer.publicKey.toBase58()}`);
+  console.log(`  mode     ${config.dryRun ? "DRY RUN (simulate only, nothing is sent)" : "LIVE"}`);
+  console.log(`  rpc      ${redact(config.rpcUrl)}`);
+  console.log(`  sender   ${config.senderUrl}`);
+  console.log(`  buy      ${config.buySol} SOL + ${config.buyTipSol} SOL tip, slippage ${config.buySlippageBps / 100}%`);
+  console.log(`  limits   ${config.maxSolPerDay} SOL/day (spent ${solFromLamports(spentToday())}), ${config.maxOpenPositions} open max, ${positions().length} open now`);
+  console.log(`  exits    TP +${config.takeProfitPct}%, SL -${config.stopLossPct}%, max hold ${config.maxHoldSeconds}s`);
 
-  const request: SubscribeRequest = {
-    accounts: {},
-    slots: {},
-    transactions: {
-      pumpFun: {
-        accountInclude: [PUMP_PROGRAM_ID],
-        accountExclude: [],
-        accountRequired: [],
-      },
-    },
-    transactionsStatus: {},
-    entry: {},
-    blocks: {},
-    blocksMeta: {},
-    commitment: CommitmentLevel.PROCESSED,
-    accountsDataSlice: [],
-    ping: undefined,
-  };
+  await loadFees();
+  await startBlockhashCache();
+  startSenderKeepAlive();
+  startPositionManager();
 
-  stream.write(request);
-  console.log("✓ Listening for new Pump.fun tokens...\n");
-
-  stream.on("data", async (data: SubscribeUpdate) => {
-    const transaction = data.transaction?.transaction;
-    const message = transaction?.transaction?.message;
-    
-    if (!transaction || !message) return;
-
-
-    // method one
-    const createInstruction = message.instructions.find(ix => 
-      ix.data && CREATE_DISCRIMINATOR.equals(ix.data.slice(0, 8))
-    );
-
-    
-      // method two
-    //     const createInstruction = message.instructions.find(ix => {
-    //     const descrimnator = ix.data.slice(0,8);
-
-    //    if(CREATE_DISCRIMINATOR.equals(descrimnator)){
-    //     console.log("created-----")
-    //    }
-         
-    // });
-    if (!createInstruction) return;
-
+  let backoff = 1_000;
+  for (;;) {
+    const started = Date.now();
     try {
-      const tokenData = await parseTokenData(message, createInstruction, transaction, data);
-      if (tokenData) {
-
-      console.log("─".repeat(50));
-
-
-       console.log("🚀 NEW TOKEN DETECTED FROM PUMPFUN THROUGH GRPC! ---");
-
-        console.log(tokenData);
-
-      console.log("LISTEINING FOR OHTERS TOKENS -------------- ");
-
-        console.log("─".repeat(50));
-      }
-    } catch (error) {
-      console.error("Error parsing token data:", error);
+      await streamOnce();
+    } catch (e) {
+      console.error("Stream failed:", (e as Error).message);
     }
-  });
-
-  stream.on("error", (error) => console.error("Stream error:", error));
-  stream.on("end", () => console.log("Stream ended"));
-}
-
-async function parseTokenData(message: any, instruction: any, transaction: any, data: any) {
-  try {
-    const accountKeys = message.accountKeys;
-    const accounts = instruction.accounts;
-    
-    const mint = new PublicKey(accountKeys[accounts[0]]).toBase58();
-    const bonding_curve = new PublicKey(accountKeys[accounts[2]]).toBase58();
-    const associated_bonding_curve = new PublicKey(accountKeys[accounts[3]]).toBase58();
-    const user = new PublicKey(accountKeys[accounts[7]]).toBase58();
-
-
-    const decoded = coder.decode(instruction.data, "base58");
-
-    if (!decoded) {
-        return null;
-    }
-
-    const args: Args = decoded as Args;
-
-    if (shouldProcessMint(mint)) {
-      void snipeQueue.add(() =>
-        withTimeout(
-          SnipeToken(new PublicKey(mint), args.data.creator),
-          SNIPE_TIMEOUT_MS
-        ).catch((err) => {
-          console.error("Snipe task failed:", err?.message || err);
-        })
-      );
-    }
-
-    return {
-      signature: bs58.encode(Buffer.from(transaction.signature)),
-      slot: data.transaction?.slot?.toString() || "",
-      mint,
-      name: args.data.name,
-      uri: args.data.uri,
-      symbol: args.data.symbol,
-      creator: args.data.creator.toBase58(),
-      bonding_curve,
-      associated_bonding_curve,
-      user,
-    };
-  } catch (error) {
-    console.error("Error parsing token data:", error);
-    return null;
+    if (Date.now() - started > 60_000) backoff = 1_000; // it was healthy for a while
+    console.log(`Reconnecting in ${backoff / 1000}s...`);
+    await new Promise((r) => setTimeout(r, backoff));
+    backoff = Math.min(backoff * 2, 30_000);
   }
 }
 
-
-main().catch(console.error);
+main().catch((e) => {
+  console.error("Fatal:", e.message ?? e);
+  process.exit(1);
+});

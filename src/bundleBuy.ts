@@ -1,86 +1,80 @@
-import {
-    AddressLookupTableProgram,
-    clusterApiUrl,
-    Connection,
-    Keypair,
-    LAMPORTS_PER_SOL,
-    PublicKey,
-    TransactionMessage,
-    VersionedTransaction,
-  } from "@solana/web3.js";
-  import dotenv from "dotenv";
-  import BN from "bn.js";
+import { ComputeBudgetProgram, Keypair, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
+import { config, connection } from "./config";
+import { getBlockhash, sendBundleViaSender, simulate, tipIx } from "./executor/sender";
+import { decodeBondingCurve } from "./pump/accounts";
+import { buyExactSolInV3Ix, createUserAtaIx } from "./pump/instructions";
+import { lamportsFromSol, tokensOutForSolIn, withSlippageDown } from "./pump/math";
+import { bondingCurvePda } from "./pump/pda";
+import { loadFees, totalFeeBps, tradeAccounts } from "./snipe";
 
-import { bundleBuyerKeys } from "./buyersKeys";
-import { PumpHelper } from "./pumpHelper/helper";
-  
-  dotenv.config();
+/**
+ * Buy one coin from several wallets in one transaction (uses a lookup table to fit).
+ * Respects DRY_RUN: simulates only unless DRY_RUN=false.
+ * Note: buying your own launch from many wallets to look like independent demand can be
+ * treated as market manipulation. Use this for your own wallets' positions, not to mislead buyers.
+ */
+export const bundleBuyWithLookup = async (
+  lookupAddress: PublicKey,
+  mint: PublicKey,
+  baseTokenProgram: PublicKey,
+  wallets: Keypair[],
+  solPerWallet: number,
+) => {
+  if (wallets.length === 0) throw new Error("No wallets to buy with");
+  if (solPerWallet > config.maxSolPerTrade) throw new Error(`solPerWallet is above MAX_SOL_PER_TRADE (${config.maxSolPerTrade})`);
+  if (solPerWallet * wallets.length > config.maxSolPerDay) throw new Error("Bundle total is above MAX_SOL_PER_DAY");
 
+  const table = (await connection.getAddressLookupTable(lookupAddress)).value;
+  if (!table) throw new Error("Lookup table not found");
 
-  const connection = new Connection(clusterApiUrl("mainnet-beta"), "confirmed");
-  const sdk = new PumpHelper(connection);
+  await loadFees();
+  const curveInfo = await connection.getAccountInfo(bondingCurvePda(mint), "processed");
+  if (!curveInfo) throw new Error("Bonding curve not found for this mint");
+  const curve = decodeBondingCurve(curveInfo.data);
+  if (curve.complete) throw new Error("Curve is complete; this coin trades on PumpSwap now");
 
-
-const bundleBuyWithLookup = async (lookup_address: PublicKey,creator:PublicKey,mint:PublicKey,wallets:Keypair[] = bundleBuyerKeys) => {
-    const lookupTableAccount = (
-      await connection.getAddressLookupTable(lookup_address)
-    ).value;
-  
-    if (!lookupTableAccount) throw "no account find---";
-    console.log("here is all address---", lookupTableAccount);
-
-
-    const solAmount = 0.001;
-    const tokenAmount = 17376518
-  
-    console.log("💰 Token amount to receive:", tokenAmount);
-  
-  
-    const bundle_buy_itx = [];
-  
-    for (const keypair of wallets) {
-      const tx1 = await sdk.getBuyTxs(
-        //@ts-ignore
-        GLOBAL_CONFIG,
-        creator,
-        mint,
-        keypair.publicKey,
-        100,
-        new BN(tokenAmount),
-        new BN(solAmount * LAMPORTS_PER_SOL)
-      )
-  
-      if (tx1.success) {
-        bundle_buy_itx.push(...tx1.data);
-      }
-    }
-  
-    console.log("helooooo---");
-    let latestBlockhash = await connection.getLatestBlockhash();
-  
-    const messageV0 = new TransactionMessage({
-      payerKey: wallets[0].publicKey,
-      recentBlockhash: latestBlockhash.blockhash,
-      instructions: [...bundle_buy_itx],
-    }).compileToV0Message([lookupTableAccount]);
-  
-    const transaction = new VersionedTransaction(messageV0);
-  
-    transaction.sign([...wallets, wallets[0]]);
-  
-    try {
-      const simulate = await connection.simulateTransaction(transaction);
-      console.log("here is simulation res---", simulate);
-  
-      //  const sign = await connection.sendTransaction(transaction);
-  
-      //  console.log("here is the signature----", sign);
-    } catch (e) {
-      console.log("error--", e);
-    }
-  
-    console.log(
-      "With ALT the Bundle transaction size is -----",
-      transaction.serialize().byteLength
+  const spend = lamportsFromSol(solPerWallet);
+  // Each wallet's buy moves the price for the next one, so quote them in order.
+  let sim = { ...curve };
+  const ixs = [
+    // Each buy needs roughly 100k CU, so size the limit to the number of wallets.
+    ComputeBudgetProgram.setComputeUnitLimit({ units: Math.min(1_400_000, 40_000 + 110_000 * wallets.length) }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: config.priorityFeeMicroLamports }),
+  ];
+  for (const kp of wallets) {
+    const out = tokensOutForSolIn(sim, spend, totalFeeBps());
+    ixs.push(
+      createUserAtaIx(kp.publicKey, kp.publicKey, mint, baseTokenProgram),
+      buyExactSolInV3Ix(tradeAccounts(mint, baseTokenProgram, kp.publicKey), spend, withSlippageDown(out, BigInt(config.buySlippageBps))),
     );
-  };
+    sim = {
+      ...sim,
+      virtualSolReserves: sim.virtualSolReserves + spend,
+      virtualTokenReserves: sim.virtualTokenReserves - out,
+      realTokenReserves: sim.realTokenReserves - out,
+    };
+  }
+  ixs.push(tipIx(wallets[0].publicKey, config.buyTipSol));
+
+  const blockhash = await getBlockhash();
+  const tx = new VersionedTransaction(
+    new TransactionMessage({ payerKey: wallets[0].publicKey, recentBlockhash: blockhash.blockhash, instructions: ixs }).compileToV0Message([table]),
+  );
+  const size = tx.serialize().byteLength; // throws if too large, before signing
+  tx.sign(wallets);
+  console.log(`Bundle transaction: ${wallets.length} wallets, ${size} bytes`);
+
+  const res = await simulate(tx);
+  if (res.err) {
+    console.log("Simulation failed:", JSON.stringify(res.err), "\n" + res.logs.slice(-10).join("\n"));
+    return null;
+  }
+  console.log(`Simulation OK (${res.unitsConsumed} CU)`);
+  if (config.dryRun) {
+    console.log("DRY_RUN is on, not sending.");
+    return null;
+  }
+  const id = await sendBundleViaSender([tx]);
+  console.log("Bundle sent:", id);
+  return id;
+};

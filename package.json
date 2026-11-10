@@ -1,4 +1,11 @@
 {
+  "scripts": {
+    "start": "npx ts-node src/index.ts",
+    "typecheck": "npx tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
     "@solana/spl-token": "^0.4.14",

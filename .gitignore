@@ -1,3 +1,13 @@
 node_modules/
-.env
 dist/
+
+# Secrets: never commit these
+.env
+.env.*
+!.env.example
+keys/
+*.key
+*keypair*.json
+
+# Bot state (open positions, daily spend)
+state/
