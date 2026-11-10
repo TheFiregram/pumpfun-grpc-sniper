@@ -41,6 +41,20 @@ export const config = {
   grpcToken: str("GRPC_TOKEN", HELIUS_API_KEY),
   senderUrl: str("SENDER_URL", "http://lon-sender.helius-rpc.com/fast"),
 
+  /**
+   * How to spot launches. "websocket" works on every Helius plan, including Free.
+   * "laserstream" (gRPC) is faster but needs a Business or Professional plan.
+   */
+  feed: str("FEED", "websocket") as "websocket" | "laserstream",
+  /** WebSocket feed only: max full-transaction fetches per minute when logs are incomplete. */
+  maxTxFetchesPerMinute: num("MAX_TX_FETCHES_PER_MINUTE", 10, { min: 0, max: 600 }),
+
+  // Background refresh intervals. Defaults are sized for the Helius Free plan (1M credits a month).
+  blockhashRefreshMs: num("BLOCKHASH_REFRESH_MS", 15_000, { min: 1_000 }),
+  balanceRefreshMs: num("BALANCE_REFRESH_MS", 30_000, { min: 1_000 }),
+  /** Dry run: simulate at most one buy per this many ms (each simulation costs a credit). */
+  dryRunSimulateEveryMs: num("DRY_RUN_SIMULATE_EVERY_MS", 30_000, { min: 0 }),
+
   /** When true (the default), trades are simulated and logged but never sent. */
   dryRun: bool("DRY_RUN", true),
 
@@ -64,7 +78,7 @@ export const config = {
   takeProfitPct: num("TAKE_PROFIT_PCT", 100, { min: 1 }),
   stopLossPct: num("STOP_LOSS_PCT", 30, { min: 1, max: 100 }),
   maxHoldSeconds: num("MAX_HOLD_SECONDS", 300, { min: 5 }),
-  positionPollMs: num("POSITION_POLL_MS", 1_500, { min: 250 }),
+  positionPollMs: num("POSITION_POLL_MS", 3_000, { min: 250 }),
 
   // Launch filters
   maxDevBuyPct: num("MAX_DEV_BUY_PCT", 10, { min: 0, max: 100 }),
@@ -82,6 +96,9 @@ export const config = {
   stateFile: str("STATE_FILE", "state/state.json"),
 };
 
+if (config.feed !== "websocket" && config.feed !== "laserstream") {
+  throw new Error(`FEED=${config.feed} is invalid (use websocket or laserstream)`);
+}
 if (config.buySol > config.maxSolPerTrade) {
   throw new Error(`BUY_SOL (${config.buySol}) is above MAX_SOL_PER_TRADE (${config.maxSolPerTrade})`);
 }

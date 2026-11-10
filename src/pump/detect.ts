@@ -62,7 +62,18 @@ export function parseLaunches(update: any, receivedAt: number): Launch[] {
 
   const signature = bs58.encode(Buffer.from(txInfo.signature));
   const slot = String(update.transaction?.slot ?? "");
+  return buildLaunches(signature, slot, receivedAt, createKind, creates, trades);
+}
 
+/** Turn the create/trade events of one transaction into launches (shared by the gRPC and WebSocket feeds). */
+export function buildLaunches(
+  signature: string,
+  slot: string,
+  receivedAt: number,
+  kind: "create" | "create_v2",
+  creates: CreateEvent[],
+  trades: TradeEvent[],
+): Launch[] {
   return creates.map((create) => {
     const mintTrades = trades.filter((t) => t.mint.equals(create.mint));
     const last = mintTrades[mintTrades.length - 1];
@@ -73,6 +84,6 @@ export function parseLaunches(update: any, receivedAt: number): Launch[] {
       .filter((t) => t.isBuy && (t.user.equals(create.user) || t.user.equals(create.creator)))
       .reduce((s, t) => s + t.tokenAmount, 0n);
     const isSolPaired = create.quoteMint.equals(DEFAULT_PUBKEY) || create.quoteMint.equals(WSOL_MINT);
-    return { signature, slot, receivedAt, create, curveAfterTx, devBuyTokens, isSolPaired, instruction: createKind! };
+    return { signature, slot, receivedAt, create, curveAfterTx, devBuyTokens, isSolPaired, instruction: kind };
   });
 }

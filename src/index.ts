@@ -6,6 +6,7 @@ import { PUMP_PROGRAM_ID } from "./pump/constants";
 import { Launch, parseLaunches } from "./pump/detect";
 import { solFromLamports } from "./pump/math";
 import { startPositionManager } from "./positions";
+import { startWebsocketFeed } from "./feeds/websocket";
 import { loadFees, snipe, startBalanceCache } from "./snipe";
 import { positions, spentToday } from "./state";
 
@@ -97,7 +98,7 @@ async function streamOnce(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     stream.write(request, (err: unknown) => (err ? reject(err) : resolve()));
   });
-  console.log(`✓ Listening for Pump.fun launches on ${config.grpcEndpoint}`);
+  console.log(`✓ Listening for Pump.fun launches on LaserStream ${config.grpcEndpoint}`);
 
   let pingId = 0;
   const pinger = setInterval(() => stream.write(pingRequest(++pingId), () => undefined), 10_000);
@@ -143,6 +144,7 @@ async function main() {
   console.log("Pump.fun sniper starting");
   console.log(`  wallet   ${signer.publicKey.toBase58()}`);
   console.log(`  mode     ${config.dryRun ? "DRY RUN (simulate only, nothing is sent)" : "LIVE"}`);
+  console.log(`  feed     ${config.feed === "laserstream" ? `LaserStream gRPC ${config.grpcEndpoint}` : "Helius WebSocket (works on the Free plan)"}`);
   console.log(`  rpc      ${redact(config.rpcUrl)}`);
   console.log(`  sender   ${config.senderUrl}`);
   console.log(`  buy      ${config.buySol} SOL + ${config.buyTipSol} SOL tip, slippage ${config.buySlippageBps / 100}%`);
@@ -150,10 +152,15 @@ async function main() {
   console.log(`  exits    TP +${config.takeProfitPct}%, SL -${config.stopLossPct}%, max hold ${config.maxHoldSeconds}s`);
 
   await loadFees();
-  await startBlockhashCache();
-  if (!config.dryRun) startBalanceCache();
+  await startBlockhashCache(config.blockhashRefreshMs);
+  if (!config.dryRun) startBalanceCache(config.balanceRefreshMs);
   startSenderKeepAlive();
   await startPositionManager();
+
+  if (config.feed === "websocket") {
+    startWebsocketFeed(onLaunch, config.maxTxFetchesPerMinute);
+    return; // the WebSocket keeps the process running
+  }
 
   let backoff = 1_000;
   for (;;) {
@@ -161,7 +168,11 @@ async function main() {
     try {
       await streamOnce();
     } catch (e) {
-      console.error("Stream failed:", (e as Error).message);
+      const msg = (e as Error).message ?? "";
+      console.error("Stream failed:", msg);
+      if (/permission|unauth|denied|forbidden|401|403/i.test(msg)) {
+        console.error("LaserStream mainnet needs a Helius Business or Professional plan. On Free or Developer, set FEED=websocket in .env.");
+      }
     }
     if (Date.now() - started > 60_000) backoff = 1_000; // it was healthy for a while
     console.log(`Reconnecting in ${backoff / 1000}s...`);

@@ -31,10 +31,11 @@ export function tradeAccounts(mint: PublicKey, baseTokenProgram: PublicKey, user
 }
 
 let inFlight = 0;
+let lastDryRunSim = 0;
 
 // ---------- Wallet balance cache ----------
 let balanceCache: { lamports: bigint; at: number } | null = null;
-export function startBalanceCache(intervalMs = 3_000) {
+export function startBalanceCache(intervalMs: number) {
   const refresh = () =>
     connection
       .getBalance(getSigner().publicKey, "processed")
@@ -43,9 +44,9 @@ export function startBalanceCache(intervalMs = 3_000) {
   void refresh();
   setInterval(refresh, intervalMs).unref();
 }
-/** Cached balance, or null if it is missing or older than 15s (then the check is skipped, not failed). */
+/** Cached balance, or null if it is missing or stale (then the check is skipped, not failed). */
 function walletLamports(): bigint | null {
-  return balanceCache && Date.now() - balanceCache.at < 15_000 ? balanceCache.lamports : null;
+  return balanceCache && Date.now() - balanceCache.at < 3 * config.balanceRefreshMs ? balanceCache.lamports : null;
 }
 
 /** Raw token balance of an account: 0n if it doesn't exist, null if the RPC kept failing. */
@@ -101,6 +102,11 @@ export async function snipe(launch: Launch, deadline: number): Promise<void> {
     const built = await buildTx(ixs, signer, config.buyTipSol);
 
     if (config.dryRun) {
+      if (Date.now() - lastDryRunSim < config.dryRunSimulateEveryMs) {
+        console.log(`🧪 DRY RUN ${tag}: would buy ${config.buySol} SOL, expect ~${expected} raw tokens (not simulated, to save credits)`);
+        return;
+      }
+      lastDryRunSim = Date.now();
       const sim = await simulate(built.tx);
       console.log(
         `🧪 DRY RUN ${tag}: spend ${config.buySol} SOL, expect ~${expected} raw tokens (min ${minTokensOut}). ` +

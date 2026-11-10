@@ -1,6 +1,6 @@
 ## Pump.fun gRPC Sniper (Solana, Helius)
 
-Listens to Helius LaserStream (Yellowstone gRPC) for new Pump.fun coins, filters them, buys through
+Listens to Helius (WebSocket on any plan, or LaserStream gRPC on Business/Professional) for new Pump.fun coins, filters them, buys through
 Helius Sender, and sells on take-profit, stop-loss or a time limit. **Starts in dry-run mode**: it
 simulates every buy and sends nothing until you set `DRY_RUN=false`.
 
@@ -16,7 +16,12 @@ simulates every buy and sends nothing until you set `DRY_RUN=false`.
   buyback fee recipients are read from the on-chain Global account at startup, not hard-coded.
 - **Sends through Helius Sender** with a tip and priority fee, re-sends while waiting, and confirms
   against the same blockhash the transaction was signed with.
-- **Keeps the gRPC stream alive** with pings, a no-data watchdog and automatic reconnect with backoff.
+- **Two launch feeds.** `FEED=websocket` (default) works on every Helius plan, including Free: it
+  subscribes only to transactions that touch Pump.fun's mint-authority account, i.e. coin creations,
+  and reads the launch events from the logs. `FEED=laserstream` uses gRPC (Business/Professional plans),
+  with pings, a watchdog and automatic reconnect.
+- **Credit-friendly defaults** for the Free plan (1M credits/month): slow background refreshes, at most
+  one dry-run simulation every 30s, and a cap on full-transaction fetches.
 - **Limits risk**: max SOL per trade and per day, max open positions, minimum wallet reserve, slippage
   limits on every buy and sell, and a queue that drops stale launches instead of buying late.
 - **Exits**: polls open positions, sells on TP/SL/max hold, widens slippage after each failed sell, and
@@ -39,11 +44,12 @@ cp .env.example .env    # fill in HELIUS_API_KEY and PRIVATE_KEY
 npm run typecheck
 npm start               # dry run: watch the simulations first
 ```
-LaserStream mainnet needs a Helius Business or Professional plan. Pick the LaserStream and Sender
-regions closest to your server in `.env`.
+The default WebSocket feed works on the Helius Free plan. LaserStream (`FEED=laserstream`) is faster
+but needs a Business or Professional plan. Pick the Sender region closest to your computer in `.env`.
 
 ### Files
-- `src/index.ts`: gRPC listener, dedupe, bounded queue, startup
+- `src/feeds/websocket.ts`: WebSocket launch feed (any Helius plan)
+- `src/index.ts`: LaserStream gRPC listener, dedupe, bounded queue, startup
 - `src/snipe.ts`: quoting, buy transaction, dry-run simulation, spending checks
 - `src/positions.ts`: take-profit / stop-loss / max-hold selling
 - `src/filters.ts`: launch filters

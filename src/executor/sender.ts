@@ -25,7 +25,7 @@ async function refreshBlockhash() {
   }
 }
 
-export async function startBlockhashCache(intervalMs = 2_000) {
+export async function startBlockhashCache(intervalMs: number) {
   await refreshBlockhash();
   if (!latest) throw new Error("Could not fetch a blockhash from RPC. Check HELIUS_API_KEY / RPC_URL.");
   blockhashTimer = setInterval(refreshBlockhash, intervalMs);
@@ -33,8 +33,8 @@ export async function startBlockhashCache(intervalMs = 2_000) {
 }
 
 export async function getBlockhash(): Promise<BlockhashWithExpiryBlockHeight> {
-  // A blockhash is valid ~60s; refuse anything older than 20s so transactions don't expire in flight.
-  if (!latest || Date.now() - latest.fetchedAt > 20_000) await refreshBlockhash();
+  // A blockhash is valid ~60s; refresh on demand if the cached one is older than 30s.
+  if (!latest || Date.now() - latest.fetchedAt > 30_000) await refreshBlockhash();
   if (!latest) throw new Error("No recent blockhash available");
   return latest.value;
 }

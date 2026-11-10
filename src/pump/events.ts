@@ -74,12 +74,11 @@ function decodeTrade(r: BorshReader): TradeEvent {
   return { mint, solAmount, tokenAmount, isBuy, user, virtualSolReserves, virtualTokenReserves, realSolReserves, realTokenReserves };
 }
 
-/** Decode a Pump.fun self-CPI event instruction. Returns null for anything else. */
-export function decodePumpEventIx(data: Uint8Array): PumpEvent | null {
-  const buf = Buffer.from(data);
-  if (buf.length < 16 || !buf.subarray(0, 8).equals(EVENT_IX_TAG)) return null;
-  const disc = buf.subarray(8, 16);
-  const r = new BorshReader(buf.subarray(16));
+/** Decode event bytes that start with the 8-byte event discriminator (as found in "Program data:" logs). */
+export function decodePumpEventData(buf: Buffer): PumpEvent | null {
+  if (buf.length < 8) return null;
+  const disc = buf.subarray(0, 8);
+  const r = new BorshReader(buf.subarray(8));
   try {
     if (disc.equals(EVENT_DISC.create)) return { kind: "create", ev: decodeCreate(r) };
     if (disc.equals(EVENT_DISC.trade)) return { kind: "trade", ev: decodeTrade(r) };
@@ -87,4 +86,11 @@ export function decodePumpEventIx(data: Uint8Array): PumpEvent | null {
     console.warn("Could not decode pump event:", (e as Error).message);
   }
   return null;
+}
+
+/** Decode a Pump.fun self-CPI event instruction (tag + discriminator + data). Returns null for anything else. */
+export function decodePumpEventIx(data: Uint8Array): PumpEvent | null {
+  const buf = Buffer.from(data);
+  if (buf.length < 16 || !buf.subarray(0, 8).equals(EVENT_IX_TAG)) return null;
+  return decodePumpEventData(buf.subarray(8));
 }
