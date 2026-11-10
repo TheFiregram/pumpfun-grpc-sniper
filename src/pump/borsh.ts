@@ -45,6 +45,14 @@ export class BorshReader {
     return v;
   }
 
+  i128(): bigint {
+    this.need(16);
+    const lo = this.buf.readBigUInt64LE(this.offset);
+    const hi = this.buf.readBigInt64LE(this.offset + 8);
+    this.offset += 16;
+    return (hi << 64n) + lo;
+  }
+
   string(): string {
     this.need(4);
     const len = this.buf.readUInt32LE(this.offset);

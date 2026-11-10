@@ -152,7 +152,7 @@ async function main() {
   await loadFees();
   await startBlockhashCache();
   startSenderKeepAlive();
-  startPositionManager();
+  await startPositionManager();
 
   let backoff = 1_000;
   for (;;) {

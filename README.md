@@ -22,6 +22,9 @@ simulates every buy and sends nothing until you set `DRY_RUN=false`.
 - **Exits**: polls open positions, sells on TP/SL/max hold, widens slippage after each failed sell, and
   closes the token account afterwards to get its rent back. Positions are saved to `state/` and resume
   after a restart.
+- **Graduated coins are sold automatically on PumpSwap.** When a coin completes its bonding curve the bot
+  waits for the PumpSwap pool to open, keeps tracking TP/SL/max hold on the pool price, and sells with
+  PumpSwap `sell_v2`. The SOL comes back as wrapped SOL and is unwrapped in the same transaction.
 
 ### Filters (no RPC calls, run before every buy)
 Skips coins that are not SOL-paired, cashback coins (v3 doesn't support them), mayhem coins
@@ -46,6 +49,7 @@ regions closest to your server in `.env`.
 - `src/filters.ts`: launch filters
 - `src/state.ts`: daily spend and open positions, saved atomically to `state/state.json`
 - `src/executor/sender.ts`: Helius Sender, tips, priority fees, blockhash cache, confirmation
+- `src/pump/amm.ts`: PumpSwap pool lookup, pricing and `sell_v2`
 - `src/pump/*`: Pump.fun constants, PDAs, event/account decoding, curve maths, instruction builders
 - `src/bundleBuy.ts`, `src/lookupTable/*`: multi-wallet buy with a lookup table (optional)
 - `IDL/`: the current official Pump.fun IDL (from pump-fun/pump-public-docs), for reference
@@ -57,7 +61,7 @@ regions closest to your server in `.env`.
 3. `bundleBuyWithLookup` buys from all wallets in one transaction (respects `DRY_RUN` and spend limits).
 
 ### Not covered
-- Raydium / PumpSwap pools: coins that finish their bonding curve are left for you to sell on PumpSwap.
+- Raydium launches.
 - Coins paired with USDC or another pump coin are skipped.
 
 ### License
