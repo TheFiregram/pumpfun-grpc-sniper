@@ -37,7 +37,14 @@ Skips coins that are not SOL-paired, cashback coins (v3 doesn't support them), m
 and blocklisted names. Pump.fun mints are controlled by the program, so classic mint/freeze-authority
 rug checks don't apply here; the creator's own bag is the main risk on launch.
 
-### Setup
+### Setup on Windows (easiest)
+1. Install Node.js (LTS) from nodejs.org.
+2. Download this repo as a ZIP (green **Code** button → **Download ZIP**) and extract it.
+3. Double-click **`start-bot.bat`**. The first time it opens `.env` in Notepad: paste your Helius
+   API key and the private key of a new bot-only wallet, save, close, and double-click it again.
+   It installs everything and starts the bot in dry-run mode.
+
+### Setup (any system)
 ```bash
 npm install             # also refreshes package-lock.json for the new dev tools
 cp .env.example .env    # fill in HELIUS_API_KEY and PRIVATE_KEY
